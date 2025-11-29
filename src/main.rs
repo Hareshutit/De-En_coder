@@ -650,15 +650,16 @@ pub mod management {
     pub mod router {
         use crate::abstraction::{ResourcePath, UnifiedResourceIdentifierAbstraction};
 
-        pub struct Router<R>
+        pub struct Router<U>
             where 
-                R: crate::abstraction::ResourcePath,
+                U: crate::abstraction::UnifiedResourceIdentifierAbstraction,
+                U::Path: crate::abstraction::ResourcePath,
         {
-            inner: R,
-            out: Option<R>,
+            inner: U::Path,
+            out: Option<U::Path>,
         }
 
-        impl<U> crate::abstraction::Router for Router<U::Path>
+        impl<U> crate::abstraction::Router for Router<U>
         where 
             U: crate::abstraction::UnifiedResourceIdentifierAbstraction,
             U::Path : crate::abstraction::ResourcePath
@@ -666,26 +667,54 @@ pub mod management {
             type Error = error::Error;
             type Resource = U;
             
-            fn new(inner: <Self::Resource as UnifiedResourceIdentifierAbstraction>::Path, out: Option<<Self::Resource as UnifiedResourceIdentifierAbstraction>::Path>) -> Self {
+            fn new(inner: U::Path, out: Option<U::Path>) -> Self {
                 Router { inner, out }
             }
 
-            fn resource(&self) -> Result<Self::Resource, <Self as crate::abstraction::Reader>::Error> {
+            fn resource(&self) -> Result<Self::Resource, <Self as crate::abstraction::Router>::Error> {
                 U::new(self.inner.clone(), crate::abstraction::Operation::Open)
+                .map_err(|e| e.into())
             }
         }
 
 
-        // impl<R> crate::abstraction::Writer for Router<R>
-        //     where 
-        //         R: crate::abstraction::ResourcePath,
-        // {
-        //     type Error = error::Error;
+        impl<U> crate::abstraction::Writer for Router<U>
+            where 
+               U: crate::abstraction::UnifiedResourceIdentifierAbstraction,
+               U::Path: crate::abstraction::ResourcePath
+        {
+            type Error = error::Error;
             
-        //     fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-                
-        //     }
-        // }
+            fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+                let out_path = match &self.out {
+                    Some(p) => p,
+                    None => {
+                            return Err(error::Error::Routing("Output path not specified".into()));
+                        } ,
+                };
+
+                let mut resource = U::new(out_path.clone(), crate::abstraction::Operation::Write)
+                    .map_err(|e| e.into())?;
+
+                resource.write(buf).map_err(|e| e.into())
+            }
+        }
+
+        impl<U> crate::abstraction::Reader for Router<U>
+            where 
+                U: crate::abstraction::UnifiedResourceIdentifierAbstraction,
+                U::Path: crate::abstraction::ResourcePath
+        {
+            type Error = error::Error;
+            
+            fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+                let mut inr = U::new(self.inner.clone(), crate::abstraction::Operation::Open)
+                .map_err(|e| e.into())?;
+            
+                inr.read(buf).map_err(|e| e.into())
+            }
+        }
+
         // impl<R: crate::abstraction::ResourcePath> Router<R> {
 
         //     pub fn type_resource<U: crate::abstraction::UnifiedResourceIdentifierAbstraction, S: crate::abstraction::AbstractError>(&self) -> Result<<U as crate::abstraction::UnifiedResourceIdentifierAbstraction>::Type, crate::abstraction::Error<U, S>>
