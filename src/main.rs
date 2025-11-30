@@ -1,4 +1,6 @@
 pub mod abstraction {
+    use std::fmt::Debug;
+
 
     /// Данный типаж абстрагирует шифрование и дешифрование данных
     pub trait Encryption {
@@ -41,11 +43,13 @@ pub mod abstraction {
             Self: Sized;
             
         fn size(&self) -> usize;
-
         fn get_path(&self) -> &Self::Path;
     }
 
-    pub trait ResourceTypeList {
+    pub trait ResourceTypeList
+        where
+            Self:Sized+Debug+ 'static,
+    {
         type Error: core::error::Error + Send + Sync + 'static;
 
 
@@ -53,11 +57,15 @@ pub mod abstraction {
         fn from_byte(byte: u8) -> Result<Self, Self::Error>;
     }
     
-    pub trait EncryptionList {        
+    pub trait EncryptionList 
+        where
+            Self: Sized+Debug+ 'static,
+    {        
         type Error: core::error::Error + Send + Sync + 'static;
         type Data: Sized;
+        type Encryptions: Encryption;
         
-        fn build(&self, data: Self::Data) -> Result<impl Encryption, Self::Error>;
+        fn build(&self, data: Self::Data) -> Result<Self::Encryptions, Self::Error>;
         fn to_byte(&self) -> u8;
         fn from_byte(byte: u8) ->  Result<Self, Self::Error>;
     }
@@ -75,10 +83,14 @@ pub mod abstraction {
             where
                 Self: Sized;
         fn path(&mut self) -> &mut Self::Path;
-        fn type_resource(&self) -> Result<Self::Type, <Self as UnifiedResourceIdentifierAbstraction>::Error>;
+        fn type_resource(&mut self) -> Result<Self::Type, <Self as UnifiedResourceIdentifierAbstraction>::Error>;
     }
 
-    pub trait MagicNumbers {
+    // Стоит рассмотреть замену преобразований на TryForm
+    pub trait MagicNumbers
+        where
+            Self: Sized
+    {
         type Error: core::error::Error + Send + Sync + 'static;
         type Format: ResourceTypeList;
         type Chiper: EncryptionList;
@@ -94,28 +106,28 @@ pub mod abstraction {
         type Resource: UnifiedResourceIdentifierAbstraction;
         
         fn new(inner: <Self::Resource as UnifiedResourceIdentifierAbstraction>::Path, out: Option<<Self::Resource as UnifiedResourceIdentifierAbstraction>::Path>) -> Self;
-        fn resource(&self) -> Result<Self::Resource, <Self as Reader>::Error>;
+        fn resource(&self) -> Result<Self::Resource, <Self as Router>::Error>;
     }
 
-    pub trait Application {
+    pub trait Application
+        where
+            Self: Sized
+    {
         type Error: core::error::Error + Send + Sync + 'static;
-        type Resourse: Router;
-        type Encryptions: EncryptionList;
+        type Router: Router;
         type Scriber: MagicNumbers;
 
-        fn new<A>() -> Result<Self, crate::abstraction::error::Error<A>>
-            where 
-                A: Application;
+        fn new() -> Result<Self,  crate::abstraction::error::Error<Self>>;
 
-        fn run<A>(
+        fn run(
             &mut self, 
-        ) -> Result<(), crate::abstraction::error::Error<A>>
-            where 
-                A: Application;
+        ) -> Result<(), crate::abstraction::error::Error<Self>>;
+
         
     }
 
     pub mod error {
+
         use super::*;
         
         /// Абстрагируют все возможные ошибки в приложении
@@ -125,13 +137,15 @@ pub mod abstraction {
                 A: Application,
         {
             Application(A::Error),
-            WriterError(<A::Resourse as Writer>::Error),
-            ReaderError(<A::Resourse as Reader>::Error),
-            RouterError(<A::Resourse as Router>::Error),
-            ResourceAbstractionError(<<A::Resourse as Router>::Resource as UnifiedResourceIdentifierAbstraction>::Error),
-            ResourcePathError(<<<A::Resourse as Router>::Resource as UnifiedResourceIdentifierAbstraction>::Path as ResourcePath>::Error),
-            ResourceTypeListError(<<<A::Resourse as Router>::Resource as UnifiedResourceIdentifierAbstraction>::Type as ResourceTypeList>::Error),
-            EncryptionListError(<A::Encryptions as EncryptionList>::Error),
+            WriterError(<A::Router as Writer>::Error),
+            ReaderError(<A::Router as Reader>::Error),
+            RouterError(<A::Router as Router>::Error),
+            ResourceAbstractionError(<<A::Router as Router>::Resource as UnifiedResourceIdentifierAbstraction>::Error),
+            ResourcePathError(<<<A::Router as Router>::Resource as UnifiedResourceIdentifierAbstraction>::Path as ResourcePath>::Error),
+            ResourceTypeListError(<<<A::Router as Router>::Resource as UnifiedResourceIdentifierAbstraction>::Type as ResourceTypeList>::Error),
+            MagicNumbersError(<A::Scriber as MagicNumbers>::Error),
+            FormatListError(<<A::Scriber as MagicNumbers>::Format as ResourceTypeList>::Error),
+            EncryptionListError(<<A::Scriber as MagicNumbers>::Chiper as EncryptionList>::Error),
         }
 
         impl<A> core::fmt::Display for Error<A>
@@ -148,6 +162,8 @@ pub mod abstraction {
                     Error::ResourceTypeListError(e) => write!(f, "Ошибка типа ресурса: {}", e),
                     Error::EncryptionListError(e) => write!(f, "Ошибка шифрования: {}", e),
                     Error::RouterError(e) => write!(f, "Ошибка роутирования: {}", e),
+                    Error::FormatListError(e) => write!(f, "Ошибка поддерживаемых форматов: {}", e),
+                    Error::MagicNumbersError(e) => write!(f, "Ошибка подписи файла: {}", e),
                 }
             }
         }
@@ -155,8 +171,8 @@ pub mod abstraction {
         impl<A> core::error::Error for Error<A>
             where 
                 A: Application + core::fmt::Debug,
-                A::Resourse: UnifiedResourceIdentifierAbstraction + core::fmt::Debug,
-                A::Encryptions: EncryptionList + core::fmt::Debug,
+                A::Router: UnifiedResourceIdentifierAbstraction + core::fmt::Debug,
+                A::Scriber: MagicNumbers + core::fmt::Debug,
         {
             fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
                 match self {
@@ -168,6 +184,8 @@ pub mod abstraction {
                     Error::ResourceTypeListError(e) => Some(e),
                     Error::EncryptionListError(e) => Some(e),
                     Error::RouterError(e) => Some(e),
+                    Error::FormatListError(e) => Some(e),
+                    Error::MagicNumbersError(e) => Some(e),
                 }
             }
         }
@@ -181,6 +199,7 @@ pub mod abstraction {
 pub mod realisation {
 
     pub mod encryption {
+        use clap::Subcommand;
         use crate::{abstraction::Encryption, realisation::encryption::{xor::XorEncryption}};
 
         /// Форматы шифрования
@@ -209,8 +228,10 @@ pub mod realisation {
             }
         }
 
+        #[derive(Subcommand, Debug)]
         pub enum DataCrypto {
-            XOR(u8)
+            XOR{key: u8},
+            None,
         }
 
         pub mod error {
@@ -249,10 +270,11 @@ pub mod realisation {
         impl crate::abstraction::EncryptionList for CryptoFormat {
             type Error = error::Error;
             type Data = DataCrypto;
+            type Encryptions = EncryptionRealisation;
 
-            fn build(&self, data: Self::Data) -> Result<impl Encryption, Self::Error> {
+            fn build(&self, data: Self::Data) -> Result<Self::Encryptions, Self::Error> {
                 match (self, data) {
-                    (CryptoFormat::XOR, DataCrypto::XOR(e)) => Ok(EncryptionRealisation::XORRealisation( XorEncryption::new(e))),
+                    (CryptoFormat::XOR, DataCrypto::XOR{key}) => Ok(EncryptionRealisation::XORRealisation( XorEncryption::new(key))),
                     (CryptoFormat::XOR, _) => Err(Self::Error::IncorectDataEncryption),
                     (CryptoFormat::None, _) => Err(Self::Error::NoneExistEncryption),
                 }       
@@ -276,6 +298,7 @@ pub mod realisation {
 
         pub mod xor {
             use crate::abstraction::Encryption;
+            #[derive(Debug)]
             pub struct XorEncryption {
                 key: u8,
             }
@@ -306,15 +329,12 @@ pub mod realisation {
 
     pub mod object {
         pub mod file {
-            use std::fs::File;
             use std::io::{Read, Write};
 
             use crate::abstraction::{ResourcePath, UnifiedResourceIdentifierAbstraction};
 
             pub mod path {
                 pub mod file_system {
-                    use std::fs::File;
-                    use std::io::{Read, Write};
 
                     #[derive(Debug, Clone)]
                     pub struct FilePath(std::path::PathBuf);
@@ -395,6 +415,7 @@ pub mod realisation {
 
             pub mod resource_type {
 
+                #[derive(Debug)]
                 pub enum ResourceType{
                     FileFormat(file_format::FileFormat),
                     Crypted,
@@ -414,11 +435,11 @@ pub mod realisation {
 
                     fn from_byte(byte: u8) -> Result<Self, Self::Error> {
                         match byte {
-                            3 =>  ResourceType::FileFormat(file_format::FileFormat::OfficeOpenXmlDocument),
-                            2 =>  ResourceType::FileFormat(file_format::FileFormat::PlainText),
-                            1 =>  ResourceType::Crypted,
-                            0 =>  ResourceType::UnknowFormat,
-                            _ => Err(Self::BrokenByteFormat),
+                            3 =>  Ok(ResourceType::FileFormat(file_format::FileFormat::OfficeOpenXmlDocument)),
+                            2 =>  Ok( ResourceType::FileFormat(file_format::FileFormat::PlainText)),
+                            1 =>  Ok(ResourceType::Crypted),
+                            0 =>  Ok(ResourceType::UnknowFormat),
+                            _ => Err(Self::Error::BrokenByteFormat),
                         }
                         
                     }
@@ -517,8 +538,11 @@ pub mod realisation {
                     &mut self.path
                 }
 
-                fn type_resource(&self) -> Result<Self::Type, <Self as UnifiedResourceIdentifierAbstraction>::Error> {
-                    file_format::FileFormat::from_file(self.file)
+                fn type_resource(&mut self) -> Result<Self::Type, <Self as UnifiedResourceIdentifierAbstraction>::Error> {
+                    match file_format::FileFormat::from_reader(&mut self.file) {
+                        Ok(r) => Ok(Self::Type::FileFormat(r)),
+                        Err(e) => Err(e),
+                    }
                 }
             }
         }
@@ -529,8 +553,9 @@ pub mod management {
     use core::cmp::PartialOrd;
 
     use clap::{error::Error, Parser};
+    use docx_rs::DataBinding;
     use file_format::FileFormat;
-    use crate::{abstraction::{ EncryptionList, ResourcePath, ResourceTypeList}, realisation::{encryption::CryptoFormat, object::file}};
+    use crate::{abstraction::{ EncryptionList, ResourcePath, ResourceTypeList, UnifiedResourceIdentifierAbstraction}, realisation::{encryption::{CryptoFormat, DataCrypto}, object::file}};
 
 
 
@@ -555,7 +580,7 @@ pub mod management {
                 RT: crate::abstraction::ResourceTypeList,
                 CA: crate::abstraction::EncryptionList,
         {
-            type Error = error::Error;
+            type Error = error::Error<RT, CA>;
             type Chiper = CA;
             type Format = RT;
 
@@ -569,10 +594,10 @@ pub mod management {
 
             fn read_from_buffer(buf: &[u8; 12]) -> Result<Self, Self::Error> {
                 if buf[0] != 3 && buf[11] != 243 {
-                    return  Err(Self::Errpr::NotFoundSubscribe);
+                    return  Err(Self::Error::NotFoundSubscribe);
                 }
-                let format = Self::Format::from_byte(buf[1])?;
-                let chiper = Self::Chiper::from_byte( buf[2])?;
+                let format = Self::Format::from_byte(buf[1]).map_err(|e| Self::Error::FormatError(e) )?;
+                let chiper = Self::Chiper::from_byte( buf[2]).map_err(|e| Self::Error::ChiperError(e) )?;
                 
                 Ok(Self{
                         format:format,
@@ -583,31 +608,47 @@ pub mod management {
             fn write_to_buffer(&mut self, old_buf: &mut [u8], new_buf: &mut [u8]) {
                 let mut res = self.to_byte().to_vec();         
                 res.extend_from_slice(old_buf);
-                new_buf.write(res);  
+                new_buf.copy_from_slice(&res);  
             }
 
         }
 
         pub mod error {
             #[derive(Debug)]
-            pub enum Error{
+            pub enum Error<RT, CA>
+                where 
+                    RT: crate::abstraction::ResourceTypeList,
+                    CA: crate::abstraction::EncryptionList,
+            {
                 NotFoundSubscribe,
+                FormatError(RT::Error),
+                ChiperError(CA::Error)
             }
 
-            impl core::fmt::Display for Error
+            impl<RT, CA> core::fmt::Display for Error<RT, CA>
+                where 
+                    RT: crate::abstraction::ResourceTypeList,
+                    CA: crate::abstraction::EncryptionList,
             {
                 fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> std::fmt::Result {
                     match self {
                         Self::NotFoundSubscribe => write!(f, "Подпись файла не найдена"),
+                        Self::FormatError(e) => write!(f, "Неправильно указан формат данных {}", e),
+                        Self::ChiperError(e) => write!(f, "Неправильно указан формат шифрования {}", e),
                     }
                 }
             }
 
-            impl core::error::Error for Error
+            impl<RT, CA> core::error::Error for Error<RT, CA>
+                where 
+                    RT: crate::abstraction::ResourceTypeList,
+                    CA: crate::abstraction::EncryptionList,
             {
                 fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
                     match self {
                         Self::NotFoundSubscribe => None,
+                        Self::FormatError(e) => Some(e),
+                        Self::ChiperError(e) => Some(e),
                     }
                 }
             }
@@ -630,8 +671,8 @@ pub mod management {
                     path_inner: String,
                     #[arg(short, long)]
                     path_outer: Option<String>,
-                    #[arg(short, long)]
-                    chiper_algorithm: Option<crate::realisation::encryption::DataCrypto>,
+                    #[command(subcommand)]
+                    chiper_algorithm: crate::realisation::encryption::DataCrypto,
                 },
                 ///Чтение файла, аргумент - путь до файла
                 Read { path: String },
@@ -640,8 +681,6 @@ pub mod management {
                     path_inner: String,
                     #[arg(short, long)]
                     path_outer: Option<String>,
-                    #[arg(short, long)]
-                    chiper_algorithm: Option<crate::realisation::encryption::DataCrypto>,
                 },
             }
         }
@@ -664,7 +703,7 @@ pub mod management {
             U: crate::abstraction::UnifiedResourceIdentifierAbstraction,
             U::Path : crate::abstraction::ResourcePath
         {
-            type Error = error::Error;
+            type Error = error::Error<U>;
             type Resource = U;
             
             fn new(inner: U::Path, out: Option<U::Path>) -> Self {
@@ -673,7 +712,6 @@ pub mod management {
 
             fn resource(&self) -> Result<Self::Resource, <Self as crate::abstraction::Router>::Error> {
                 U::new(self.inner.clone(), crate::abstraction::Operation::Open)
-                .map_err(|e| e.into())
             }
         }
 
@@ -686,14 +724,8 @@ pub mod management {
             type Error = error::Error;
             
             fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-                let out_path = match &self.out {
-                    Some(p) => p,
-                    None => {
-                            return Err(error::Error::Routing("Output path not specified".into()));
-                        } ,
-                };
 
-                let mut resource = U::new(out_path.clone(), crate::abstraction::Operation::Write)
+                let mut resource = U::new(self.out.clone(), crate::abstraction::Operation::Write)
                     .map_err(|e| e.into())?;
 
                 resource.write(buf).map_err(|e| e.into())
@@ -793,92 +825,160 @@ pub mod management {
         // }
 
         pub mod error {
+            use crate::abstraction::UnifiedResourceIdentifierAbstraction;
+
             #[derive(Debug)]
-            pub enum Error{
-                NotFoundSubscribe,
+            pub enum Error<U> 
+                where 
+                    U: UnifiedResourceIdentifierAbstraction,
+            {
+                ResourcePathError(<<U as crate::abstraction::UnifiedResourceIdentifierAbstraction>::Path as crate::abstraction::ResourcePath>::Error),
             }
 
-            impl core::fmt::Display for Error
+            impl<U> core::fmt::Display for Error<U>
+                where 
+                    U: UnifiedResourceIdentifierAbstraction,
             {
                 fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> std::fmt::Result {
                     match self {
-                        Self::NotFoundSubscribe => write!(f, "Подпись файла не найдена"),
+                        Self::ResourcePathError(e) => write!(f, "Ошибка пути ресурса {}", e),
                     }
                 }
             }
 
-            impl core::error::Error for Error
+            impl<U> core::error::Error for Error<U>
+                where 
+                    U: UnifiedResourceIdentifierAbstraction,
             {
                 fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
                     match self {
-                        Self::NotFoundSubscribe => None,
+                        Self::ResourcePathError(e) => Some(e),
                     }
+                }
+            }
+        }
+    }
+
+    pub mod error{
+        #[derive(Debug)]
+        pub enum Error{
+            NotFoundSubscribe,
+        }
+
+        impl core::fmt::Display for Error
+        {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> std::fmt::Result {
+                match self {
+                    Self::NotFoundSubscribe => write!(f, "Подпись файла не найдена"),
+                }
+            }
+        }
+
+        impl core::error::Error for Error
+        {
+            fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+                match self {
+                    Self::NotFoundSubscribe => None,
                 }
             }
         }
     }
     
 
-    pub struct App<U>
+    pub struct App<R, M>
         where 
-            U: crate::abstraction::UnifiedResourceIdentifierAbstraction,
+            R: crate::abstraction::Router,
+            M: crate::abstraction::MagicNumbers,
     {
         buffer: Vec<u8>,
-        resource: Router<U::Path>,
+        resource: R,
+        scriber: M,
         cli: interface::cli::Cli,
     }
 
-    impl<U> App<U>
+    impl<R, M> crate::abstraction::Application for  App<R, M>
         where
-            U: crate::abstraction::UnifiedResourceIdentifierAbstraction,
-            U::Path: crate::abstraction::ResourcePath,
+            R: crate::abstraction::Router,
+            M: crate::abstraction::MagicNumbers,
     {
-        pub fn new<S: crate::abstraction::AbstractError>() -> Result<App<U>, crate::abstraction::Error<U,S>>
+        type Error = error::Error;
+        type Router = R;
+        type Scriber = M;
+
+        fn new() -> Result<Self,  crate::abstraction::error::Error<Self>>
         {
             let cli = interface::cli::Cli::parse();
 
-            let mut path = match &cli.command {
-                interface::cli::Command::Read { path } => match U::Path::new(path.to_string(), crate::abstraction::Operation::Open) {
-                    Ok(res_path) => (res_path, None),
-                    Err(e) => return Err(crate::abstraction::Error::new(Box::new(e))),
+            match &cli.command {
+                interface::cli::Command::Read { path } => {
+                    let resource: <Self::Router as crate::abstraction::Router>::Resource = <<Self::Router as crate::abstraction::Router>::Resource as crate::abstraction::UnifiedResourceIdentifierAbstraction>::Path::new(path.to_string(), crate::abstraction::Operation::Open)?;
+                    let size: usize = resource.path().size();
+                    let mut buf: Vec<u8> = vec![0u8; size];
+                    let mut router = Self::Router::new( resource.path(), None);
+                    router.read(&mut buf)?;
+                    let scriber: Self::Scriber  = <Self::Scriber>::read_from_buffer(&buf)?;
+                    App{
+                        buffer: buf,
+                        resource: router,
+                        scriber: scriber,
+                        cli: cli,
+                    }
+
                 },
                 interface::cli::Command::Prepare {
                     path_inner,
                     path_outer,
-                }
-                | interface::cli::Command::Decrypt {
+                    chiper_algorithm,
+                } => {
+                    let chiper = chiper_algorithm;
+                    let mut resource_inner: <Self::Router as crate::abstraction::Router>::Resource = <<Self::Router as crate::abstraction::Router>::Resource as crate::abstraction::UnifiedResourceIdentifierAbstraction>::Path::new(path_inner.to_string(), crate::abstraction::Operation::Open)?;
+                    let mut resource_outer: Option<<Self::Router as crate::abstraction::Router>::Resource> = match path_outer {
+                        Some(path) => Ok(<<Self::Router as crate::abstraction::Router>::Resource as crate::abstraction::UnifiedResourceIdentifierAbstraction>::Path::new(path.to_string(), crate::abstraction::Operation::Create)?),
+                        None => None,
+                    };
+                    let size: usize = resource_inner.path().size();
+                    let mut buf: Vec<u8> = vec![0u8; size];
+                    let mut scriber = Self::Scriber::new(resource_inner.type_resource()?, chiper);
+                    let mut router = match resource_outer {
+                        Some(p) => Self::Router::new( resource_inner.path(), p.path()),
+                        None => Self::Router::new( resource_inner.path(),  None),
+                    };
+                    router.read(&buf)?;
+                    App{
+                        buffer: buf,
+                        resource: router,
+                        scriber: scriber,
+                        cli: cli,
+                    }
+                },
+                interface::cli::Command::Decrypt {
                     path_inner,
                     path_outer,
-                } => (
-                    match U::Path::new(path_inner.to_string(), crate::abstraction::Operation::Open) {
-                        Ok(res_path) =>  res_path,
-                        Err(e) => return Err(crate::abstraction::Error::new(Box::new(e))),
-                    },
-                    match path_outer {
-                        Some(p) => match U::Path::new(p.to_string(), crate::abstraction::Operation::Create) {
-                            Ok(res_path) => Some(res_path),
-                            Err(e) => return Err(crate::abstraction::Error::new(Box::new(e))),
-                        },
+                } => {
+                    let mut resource_inner: <Self::Router as crate::abstraction::Router>::Resource = <<Self::Router as crate::abstraction::Router>::Resource as crate::abstraction::UnifiedResourceIdentifierAbstraction>::Path::new(path_inner.to_string(), crate::abstraction::Operation::Open)?;
+                    let mut resource_outer: Option<<Self::Router as crate::abstraction::Router>::Resource> = match path_outer {
+                        Some(path) => Ok(<<Self::Router as crate::abstraction::Router>::Resource as crate::abstraction::UnifiedResourceIdentifierAbstraction>::Path::new(path.to_string(), crate::abstraction::Operation::Create)?),
                         None => None,
-                    },
-                ),
-            };
-
-            let size: usize = path.0.size();
-            let mut buf: Vec<u8> = vec![0u8; size];
-
-            let mut router = Router::new( path.0, path.1);
-            match router.read(&mut buf, crate::abstraction::Operation::Open) {
-                Ok(_) => Result::Ok(App {
-                    buffer: buf,
-                    resource: router,
-                    cli: cli,
-                }),
-                Err(e) => Result::Err(e),
+                    };
+                    let size: usize = resource_inner.path().size();
+                    let mut buf: Vec<u8> = vec![0u8; size];
+                    let mut router = match resource_outer {
+                        Some(p) => Self::Router::new( resource_inner.path(), p.path()),
+                        None => Self::Router::new( resource_inner.path(),  None),
+                    };
+                    router.read(&buf)?;
+                    let scriber: Self::Scriber  = <Self::Scriber>::read_from_buffer(&buf)?;
+                    App{
+                        buffer: buf,
+                        resource: router,
+                        scriber: scriber,
+                        cli: cli,
+                    }
+                },
             }
         }
 
-        pub fn run<S: crate::abstraction::AbstractError>(&mut self, encrypt: crate::realisation::encryption::CryptoFormat) -> Result<(), crate::abstraction::Error<U, S>> {
+        fn run(&mut self, encrypt: crate::realisation::encryption::CryptoFormat) -> Result<(), crate::abstraction::Error<U, S>> {
             match &self.cli.command {
                 interface::cli::Command::Prepare{..} => match encrypt.build() {
                     Ok(e) => {
@@ -934,7 +1034,7 @@ pub mod management {
     }
 }
 
-fn main() -> Result<(), crate::abstraction::Error<management::App>> {
+fn main() -> Result<(), crate::abstraction::error::Error<impl crate::abstraction::Application>> {
     let mut app = management::App::<realisation::object::file::FileResourceIdentifier>::new()?;
     app.run(realisation::encryption::CryptoFormat::XOR(0xAA))
 }
