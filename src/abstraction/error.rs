@@ -1,6 +1,8 @@
 use super::*;
+
 /// Абстрагируют все возможные ошибки в приложении
 #[derive(Debug)]
+
 pub enum Error<A>
 where
     A: Application,
@@ -19,6 +21,7 @@ where
     NonceError(<<A::Kdf as KeyDeriver<String, ()>>::Nonce as NonceProvider>::Error),
     SaltError(<<A::Kdf as KeyDeriver<String, ()>>::Salt as SaltProvider>::Error),
 }
+
 impl<A> core::fmt::Display for Error<A>
 where
     A: Application,
@@ -41,6 +44,7 @@ where
         }
     }
 }
+
 impl<A> core::error::Error for Error<A>
 where
     A: Application + core::fmt::Debug,

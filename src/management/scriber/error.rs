@@ -1,4 +1,5 @@
 #[derive(Debug)]
+
 pub enum Error<RT, CA, SP, NP>
 where
     RT: crate::abstraction::ResourceTypeList,
@@ -13,6 +14,7 @@ where
     SaltError(SP::Error),
     NonceError(NP::Error),
 }
+
 impl<RT, CA, SP, NP> core::fmt::Display for Error<RT, CA, SP, NP>
 where
     RT: crate::abstraction::ResourceTypeList,
@@ -33,6 +35,7 @@ where
         }
     }
 }
+
 impl<RT, CA, SP, NP> core::error::Error for Error<RT, CA, SP, NP>
 where
     RT: crate::abstraction::ResourceTypeList,

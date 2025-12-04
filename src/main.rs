@@ -1,8 +1,7 @@
 use crate::abstraction::Application;
 
-
-mod management;
 mod abstraction;
+mod management;
 mod realisation;
 
 type Applicat = management::App<
@@ -21,5 +20,6 @@ type Applicat = management::App<
 
 fn main() -> Result<(), crate::abstraction::error::Error<Applicat>> {
     let mut app = Applicat::new()?;
+
     app.run()
 }

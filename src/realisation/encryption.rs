@@ -5,10 +5,12 @@ pub mod xor;
 
 /// Форматы шифрования
 #[derive(Debug, Clone)]
+
 pub enum CryptoFormat {
     XOR,
     None,
 }
+
 impl core::fmt::Display for CryptoFormat {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -17,6 +19,7 @@ impl core::fmt::Display for CryptoFormat {
         }
     }
 }
+
 impl core::str::FromStr for CryptoFormat {
     type Err = &'static str; // Тип ошибки, если парсинг не удался
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -27,9 +30,12 @@ impl core::str::FromStr for CryptoFormat {
         }
     }
 }
+
 impl crate::abstraction::EncryptionList for CryptoFormat {
     type Error = error::Error;
+
     type Encryptions = EncryptionRealisation;
+
     fn build(&self, key: &[u8]) -> Result<Self::Encryptions, error::Error> {
         match self {
             CryptoFormat::XOR => Ok(EncryptionRealisation::XORRealisation(XorEncryption {
@@ -38,6 +44,7 @@ impl crate::abstraction::EncryptionList for CryptoFormat {
             CryptoFormat::None => Err(error::Error::NoneExistEncryption),
         }
     }
+
     fn from_byte(byte: u8) -> Result<Self, Self::Error> {
         match byte {
             1 => Ok(crate::realisation::encryption::CryptoFormat::XOR),
@@ -45,6 +52,7 @@ impl crate::abstraction::EncryptionList for CryptoFormat {
             _ => return Err(Self::Error::BrokenByteEncryption),
         }
     }
+
     fn to_byte(&self) -> u8 {
         match self {
             CryptoFormat::XOR => 1,
@@ -52,25 +60,32 @@ impl crate::abstraction::EncryptionList for CryptoFormat {
         }
     }
 }
+
 #[derive(Debug)]
+
 pub enum EncryptionRealisation {
     XORRealisation(XorEncryption),
 }
+
 pub enum Key {
     Xor(XorEncryption),
 }
+
 impl Encryption for EncryptionRealisation {
     type Key = Key;
+
     fn new(key: Self::Key) -> Self {
         match key {
             Key::Xor(k) => EncryptionRealisation::XORRealisation(k),
         }
     }
+
     fn decode(&self, buf: &mut [u8]) {
         match self {
             EncryptionRealisation::XORRealisation(e) => e.decode(buf),
         }
     }
+
     fn encode(&self, buf: &mut [u8]) {
         match self {
             EncryptionRealisation::XORRealisation(e) => e.encode(buf),

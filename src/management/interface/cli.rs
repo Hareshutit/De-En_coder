@@ -1,9 +1,12 @@
 #[derive(clap::Parser, Debug)]
+
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
 }
+
 #[derive(clap::Subcommand, Debug)]
+
 pub enum Command {
     ///Шифрование файла, аргумент - путь до файла
     Prepare {
