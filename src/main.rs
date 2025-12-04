@@ -3,8 +3,6 @@ use crate::abstraction::Application;
 pub mod abstraction {
     use std::fmt::Debug;
 
-    use crate::realisation::derive_key::chacha::nonce;
-
     /// Данный типаж абстрагирует шифрование и дешифрование данных
     pub trait Encryption {
         type Key: Sized;
@@ -26,11 +24,7 @@ pub mod abstraction {
 
     pub trait Params<P>: Debug + Send + Sync + 'static {
     /// Получить параметры в виде среза байтов, 
-    /// если они могут быть представлены таким образом (например, для контекста HKDF).
-    ///
-    /// Если параметры представляют собой более сложную структуру, 
-    /// этот метод может вернуть пустой срез или его реализация может не требоваться,
-    /// если KDF обращается к полям структуры напрямую.
+    /// если они могут быть представлены таким образом.
         fn new(parametr: P) -> Self;
         fn as_bytes(&self) -> &[u8];
     }
@@ -39,10 +33,9 @@ pub mod abstraction {
         where 
             Self: Debug
     {
-    /// Тип ошибки, возвращаемой при сбое вывода ключа.
         type Error: core::error::Error + Send + Sync + 'static;
 
-        /// Длина ключа, который генерирует KDF (например, 16, 24 или 32 байта).
+        /// Длина ключа, который генерирует KDF.
         const KEY_LENGTH: usize;
 
         /// Параметры, необходимые для вывода (помимо секретного ключа).
@@ -54,7 +47,7 @@ pub mod abstraction {
 
         fn new(
             secret: Self::Secret,
-            _params: Self::Params, // Игнорируем параметры
+            _params: Self::Params,
             salt: Self::Salt,
             nonce: Self::Nonce,
         ) -> Self
@@ -120,7 +113,7 @@ pub mod abstraction {
     {
         type Error: core::error::Error + Send + Sync + 'static;
 
-
+        fn print_function(&self, bytes: &[u8]);
         fn to_byte(&self) -> u8;
         fn from_byte(byte: u8) -> Result<Self, Self::Error>;
     }
@@ -159,7 +152,7 @@ pub mod abstraction {
         type Error: core::error::Error + Send + Sync + 'static;
         const NONCE_SIZE: usize;
 
-        fn generate() -> Result<Self, Self::Error>
+        fn generate(password: &str, salt: &[u8]) -> Result<Self, Self::Error>
         where
             Self: Sized;
         fn as_bytes(&self) -> &[u8];
@@ -181,7 +174,6 @@ pub mod abstraction {
             Self: Sized;
     }
 
-    // Стоит рассмотреть замену преобразований на TryForm
     pub trait Header
         where
             Self: Sized
@@ -196,6 +188,7 @@ pub mod abstraction {
         fn to_byte(&self) -> [u8; 42];
         fn read_from_buffer(buf: &[u8]) -> Result<Self, Self::Error>;
         fn write_to_buffer(&mut self, old_buf: &mut [u8], new_buf: &mut [u8]);
+        fn remove_from_buffer(&mut self, old_buf: &mut [u8], new_buf: &mut [u8]);
         fn get_salt(&self) -> Self::Salt;
         fn get_nounce(&self) -> Self::Nonce;
         fn get_cipher(&self) -> Self::Cipher;
@@ -313,7 +306,6 @@ pub mod realisation {
 
         pub mod chacha {
             use crate::abstraction::{Secret, SaltProvider};
-            use cipher::{KeyIvInit, StreamCipher};
 
             pub mod secret {
                 /// Секрет (ключ) для ChaCha20. Должен быть 32 байта.
@@ -333,16 +325,21 @@ pub mod realisation {
 
                 impl crate::abstraction::NonceProvider for ChaChaNonce {
                     type Error = super::error::ChaChaError;
-                    // Стандартный размер Nonce для ChaCha20 - 12 байт
                     const NONCE_SIZE: usize = 12;
 
-                    fn generate() -> Result<Self, Self::Error>
+                    fn generate(password: &str, salt: &[u8]) -> Result<Self, Self::Error>
                     where
                         Self: Sized,
                     {
-                        let mut salt = [0u8; Self::NONCE_SIZE];
-                        getrandom::fill(&mut salt)?;
-                        Ok(Self(salt))
+                        use sha2::{Digest, Sha256};
+                        let mut hasher = Sha256::new();
+                        hasher.update(password.as_bytes());
+                        hasher.update(salt);
+                        let digest = hasher.finalize(); // 32 байта
+
+                        let mut nonce = [0u8; 12];
+                        nonce.copy_from_slice(&digest[..12]);
+                        Ok(ChaChaNonce(nonce))
                     }
 
                     fn as_bytes(&self) -> &[u8] {
@@ -361,9 +358,7 @@ pub mod realisation {
             }
 
             pub mod salt {
-                use rand::rngs::OsRng;
-                use rand::TryRngCore;
-        
+       
                 const STANDARD_SALT_SIZE: usize = 16;
         
                 #[derive(Debug, Clone)]
@@ -378,29 +373,22 @@ pub mod realisation {
         
                     fn generate() -> Result<Self, Self::Error> {
                         let mut salt = [0u8; Self::SALT_SIZE];
-                        
-                        match OsRng.try_fill_bytes(&mut salt) {
-                            Ok(_) => (),
-                            Err(_) => return Err(error::SaltError),
-                        }
-        
-                        Ok(StandardSalt { value: salt })
+                        getrandom::fill(&mut salt).map_err(crate::realisation::derive_key::chacha::error::ChaChaError::RandomFailed).map_err(|e| error::SaltError)?;
+                        Ok(StandardSalt{value: salt})
                     }
-        
-                    fn as_bytes(&self) -> &[u8] {
-                        &self.value
-                    }
-                    
+
                     fn from_bytes(bytes: &[u8]) -> Result<Self, Self::Error> {
                         if bytes.len() != Self::SALT_SIZE {
                             return Err(error::SaltError);
                         }
-                        
                         let mut value = [0u8; Self::SALT_SIZE];
         
                         value.copy_from_slice(bytes); 
-                        
-                        Ok(StandardSalt { value })
+                        Ok(Self{value})
+                    }
+
+                    fn as_bytes(&self) -> &[u8] {
+                        &self.value
                     }
                 }
         
@@ -438,13 +426,11 @@ pub mod realisation {
                 type Error = error::ChaChaError;
                 const KEY_LENGTH: usize = L;
 
-                /// Мы не используем параметры, поэтому указываем `()`.
+                /// Мы не используем параметры в данном генераторе, поэтому указываем `()`.
                 type Params = ();
                 
-                /// Соль - это Nonce для ChaCha20 (12 байт).
                 type Salt = salt::StandardSalt;
 
-                /// Секрет - это ключ для ChaCha20 (16 байта).
                 type Secret = secret::ChaChaKey;
 
                 type Nonce =  nonce::ChaChaNonce;
@@ -475,29 +461,28 @@ pub mod realisation {
                 where
                     Self: Sized,
                 {
-                    // 1. Проверяем, что выходной буфер имеет ожидаемую длину
+                    // Проверяем длину буфера
                     if buffer.len() != Self::KEY_LENGTH {
                         return Err(Self::Error::LengthMismatch);
                     }
 
-                    // 2. Получаем срезы байтов.
-                    // (Наши типы ChaChaKey и ChaChaNonce уже гарантируют правильную длину)
-                    let key_bytes = self.secret.as_bytes();
-                    let nonce_bytes = self.nonce.as_bytes();
+                    // 1) Построим SHA256(secret and salt)
+                    use sha2::{Digest, Sha256};
+                    let mut hasher = Sha256::new();
+                    hasher.update(self.secret.as_bytes());
+                    hasher.update(self.salt.as_bytes());
+                    let digest = hasher.finalize(); // 32 байта
 
-                    // 3. Инициализируем шифр ChaCha20
-                    // `Key::from_slice` и `Nonce::from_slice` ожидают срезы точной длины
-                    let key = chacha20::Key::from_slice(key_bytes);
-                    let nonce = chacha20::Nonce::from_slice(nonce_bytes);
-                    let mut cipher = chacha20::ChaCha20::new(key, nonce);
+                    // 2) Если KEY_LENGTH <= 32, используем первые KEY_LENGTH байт digest
+                    //    Если больше, можно расширять при помощи HKDF/DRBG — здесь
+                    //    мы поддерживаем KEY_LENGTH <= 32 (рекомендация: 32)
+                    if Self::KEY_LENGTH > 32 {
+                        // для простоты — не поддерживаем >32 в этой реализации
+                        return Err(Self::Error::LengthMismatch);
+                    }
 
-                    // 4. Генерируем гамму (keystream) в буфер.
-                    // Мы используем трюк: заполняем буфер нулями,
-                    // а затем "шифруем" его.
-                    // Результат (0 XOR Keystream) будет равен самому Keystream.
-                    buffer.fill(0);
-                    cipher.apply_keystream(buffer);
-                    
+                    buffer.copy_from_slice(&digest[..Self::KEY_LENGTH]);
+
                     Ok(())
                 }
             }
@@ -514,8 +499,8 @@ pub mod realisation {
             impl core::fmt::Display for ChaChaError {
                 fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
                     match self {
-                        ChaChaError::LengthMismatch => write!(f, "Length mismatch for key, nonce, or buffer"),
-                        ChaChaError::RandomFailed(e) => write!(f, "Failed to generate random salt: {}", e),
+                        ChaChaError::LengthMismatch => write!(f, "Ошибка длины salt, key, nonce"),
+                        ChaChaError::RandomFailed(e) => write!(f, "Ошибка генерации случайной соли: {}", e),
                     }
                 }
             }
@@ -536,7 +521,6 @@ pub mod realisation {
     }
 
     pub mod encryption {
-        use clap::Subcommand;
         use crate::{abstraction::Encryption, realisation::encryption::{xor::XorEncryption}};
 
         /// Форматы шифрования
@@ -703,7 +687,7 @@ pub mod realisation {
         pub mod file {
             use std::io::{Read, Write};
 
-            use crate::abstraction::{ResourcePath, UnifiedResourceIdentifierAbstraction};
+            use crate::abstraction::ResourcePath;
 
             pub mod path {
                 pub mod file_system {
@@ -722,15 +706,12 @@ pub mod realisation {
                         where
                             Self: Sized,
                         {
-                            println!("ha");
                             let path = std::path::PathBuf::from(path);
                             match std::fs::metadata(&path) {
                                 Ok(metadata) => {
                                     if metadata.is_file() {
-                                        println!("hat");
                                         Ok(FilePath(path))
                                     } else {
-                                        println!("har");
                                         Err(std::io::Error::new(
                                             std::io::ErrorKind::InvalidInput,
                                             format!(
@@ -741,7 +722,6 @@ pub mod realisation {
                                     }
                                 }
                                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                                    println!("has");
                                     match op {
                                         crate::abstraction::Operation::Open
                                         | crate::abstraction::Operation::Truncate => {
@@ -757,7 +737,6 @@ pub mod realisation {
                                     }
                                 }
                                 Err(e) => {
-                                    println!("has");
                                     Err(std::io::Error::new(
                                         e.kind(),
                                         format!(
@@ -786,6 +765,59 @@ pub mod realisation {
             }
 
             pub mod resource_type {
+                pub mod common {
+                    use docx_rs::{ DocumentChild, ParagraphChild, RunChild};
+                   
+                    /// Рекурсивно извлекает текст из документа
+                    pub fn extract_text_from_docx(docx: &docx_rs::Docx) -> String {
+                        let mut result = String::new();
+                        for element in &docx.document.children {
+                            match element {
+                                DocumentChild::Paragraph(p) => {
+                                    result.push_str(&extract_text_from_paragraph(p));
+                                    result.push('\n');
+                                }
+                                DocumentChild::Table(t) => {
+                                    for row in &t.rows {
+                                        if let docx_rs::TableChild::TableRow(row) = row { 
+                                            // Теперь 'row' - это TableRow, и ячейки лежат в row.cells
+                                            for cell in &row.cells { 
+                                                if let docx_rs::TableRowChild::TableCell(cell) = cell { 
+                                                    for content in &cell.children {
+                                                        // Внутри ячейки таблицы
+                                                        if let docx_rs::TableCellContent::Paragraph(p) = content {
+                                                            result.push_str(&extract_text_from_paragraph(p));
+                                                            result.push(' ');
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            result.push('\n'); // Новая строка после каждой строки таблицы
+                                        }   
+                                    }
+                                }
+                                _ => {} 
+                            }
+                        }
+                        result
+                    }
+
+                    /// Извлекает текст из конкретного параграфа
+                    pub fn extract_text_from_paragraph(p: &docx_rs::Paragraph) -> String {
+                        let mut text = String::new();
+                        for child in &p.children {
+                            if let ParagraphChild::Run(run) = child {
+                                for run_child in &run.children {
+                                    if let RunChild::Text(t) = run_child {
+                                        text.push_str(&t.text);
+                                    }
+                                }
+                            }
+                        }
+                        text
+                    }
+                }
+
 
                 #[derive(Debug, Clone)]
                 pub enum ResourceType{
@@ -796,6 +828,49 @@ pub mod realisation {
 
                 impl crate::abstraction::ResourceTypeList for ResourceType {
                     type Error = error::Error;
+
+                    fn print_function(&self, bytes: &[u8]) {
+                        match self {
+                            Self::FileFormat(f) => {
+                                match f {
+                                    file_format::FileFormat::PlainText => {
+                                        let text: std::borrow::Cow<str> = String::from_utf8_lossy(bytes);
+                                        println!("--- Дешифрованный ТЕКСТ (TXT) ---");
+                                        println!("{}", text);
+                                        println!("----------------------------------");
+                                    },
+                                    file_format::FileFormat::OfficeOpenXmlDocument =>  {
+                                        println!("--- Дешифрованный DOCX ---");
+                                        // Используем docx-rs для чтения из байтов
+                                        match docx_rs::read_docx(bytes) {
+                                            Ok(docx) => {
+                                                let text = common::extract_text_from_docx(&docx);
+                                                println!("{}", text);
+                                            },
+                                            Err(e) => {
+                                                println!("Ошибка парсинга DOCX файла: {:?}", e);
+                                            }
+                                        }
+                                        println!("----------------------------");
+                                    },
+                                    _ => {
+                                        println!("--- Дешифрованные БИНАРНЫЕ ДАННЫЕ (Формат: {:?}) ---", f);
+                                        let slice_len = std::cmp::min(bytes.len(), 128);
+                                        println!("Первые {} байт: {:?}", slice_len, &bytes[..slice_len]);
+                                        println!("--------------------------------------------------");
+                                    },
+                                }
+                            },   
+                            _ => {
+                                println!("--- Дешифрованные БИНАРНЫЕ ДАННЫЕ (Неизвестный тип) ---");
+                                let slice_len = std::cmp::min(bytes.len(), 128);
+                                println!("Первые {} байт: {:?}", slice_len, &bytes[..slice_len]);
+                                println!("--------------------------------------------------");
+                            }
+                        }
+                    }
+
+
                     fn to_byte(&self) -> u8  {
                         match self {
                             ResourceType::FileFormat(file_format::FileFormat::OfficeOpenXmlDocument) => 3,
@@ -891,11 +966,9 @@ pub mod realisation {
                     match op {
                         crate::abstraction::Operation::Open => {
                             let file = std::fs::File::open(&path.get_path())?;
-                            println!("dw");
                             Ok(FileResourceIdentifier { file, path: path })
                         }
                         crate::abstraction::Operation::Create => {
-                            println!("{:#?}, 3", path.get_path());
                             let file = std::fs::File::create(&path.get_path())?;
                             Ok(FileResourceIdentifier { file, path: path })
                         }
@@ -925,18 +998,14 @@ pub mod realisation {
 }
 
 pub mod management {
-    use core::cmp::PartialOrd;
     use std::marker::PhantomData;
 
-    use clap::{error::Error, Parser};
-    use docx_rs::DataBinding;
-    use file_format::FileFormat;
-    use crate::{abstraction::{ EncryptionList, NonceProvider, ResourcePath, ResourceTypeList, SaltProvider, UnifiedResourceIdentifierAbstraction}, realisation::{encryption::CryptoFormat, object::file}};
+    use clap::Parser;
+    use crate::{abstraction::{ EncryptionList, ResourcePath, UnifiedResourceIdentifierAbstraction}, realisation::encryption::CryptoFormat};
     use crate::abstraction::Secret;
     use crate::abstraction::Encryption;
 
     pub mod scriber {
-        use std::io::Write;
 
         /// Записывается в начало шифрованного файла  42 байта.
         /// 
@@ -1057,9 +1126,43 @@ pub mod management {
             }
 
             fn write_to_buffer(&mut self, old_buf: &mut [u8], new_buf: &mut [u8]) {
-                let mut res = self.to_byte().to_vec();         
-                res.extend_from_slice(old_buf);
-                new_buf.copy_from_slice(&res);  
+            // 1. Проверка размера буфера new_buf (критический шаг)
+                let required_len = 42 + old_buf.len();
+                // if new_buf.len() < required_len {
+                //     return Err("Размер выходного буфера 'new_buf' недостаточен для Заголовка и Данных.");
+                // }
+                
+                // 2. Получаем байты заголовка (эффективнее, чем to_vec() внутри)
+                let header_bytes = self.to_byte(); 
+                
+                // 3. Копируем заголовок в начало new_buf
+                new_buf[..42].copy_from_slice(&header_bytes);
+                
+                // 4. Копируем данные после заголовка
+                new_buf[42..required_len].copy_from_slice(old_buf);
+                
+                // Обнуляем лишние байты, если new_buf был больше required_len
+                // (Хотя лучше, чтобы new_buf был точно required_len)
+                
+                // Ok(())
+            }
+
+            fn remove_from_buffer(&mut self, old_buf: &mut [u8], new_buf: &mut [u8]) {
+            // 1. Проверка минимального размера
+                // if old_buf.len() < HEADER_SIZE {
+                //     return Err("Входной буфер слишком мал, чтобы содержать заголовок.");
+                // }
+                
+                // 2. Проверка размера выходного буфера
+                let data_len = old_buf.len() - 42;
+                // if new_buf.len() < data_len {
+                //     return Err("Размер выходного буфера 'new_buf' недостаточен для данных.");
+                // }
+
+                // 3. Пропускаем заголовок и копируем только данные
+                new_buf[..data_len].copy_from_slice(&old_buf[42..]);
+                
+                // Ok(()) 
             }
 
             fn get_format(&self) -> Self::Format {
@@ -1155,7 +1258,7 @@ pub mod management {
                     path_outer: Option<String>,
                     #[arg(long, default_value_t = String::from(""))]
                     password: String,
-                    #[arg(long, default_value_t = crate::realisation::encryption::CryptoFormat::None)]
+                    #[arg(long, default_value_t = crate::realisation::encryption::CryptoFormat::XOR)]
                     cipher: crate::realisation::encryption::CryptoFormat,
                 },
                 ///Чтение файла, аргумент - путь до файла
@@ -1177,7 +1280,6 @@ pub mod management {
     }
     
     pub mod router {
-        use crate::abstraction::{ResourcePath, UnifiedResourceIdentifierAbstraction};
         #[derive(Debug)]
         pub struct Router<U>
             where 
@@ -1241,8 +1343,6 @@ pub mod management {
         }
 
         pub mod error {
-            use crate::abstraction::UnifiedResourceIdentifierAbstraction;
-
             #[derive(Debug)]
             pub enum Error
             {
@@ -1345,7 +1445,7 @@ pub mod management {
 
             match &cli.command {
                 interface::cli::Command::Read { path, password } => {
-                    // 1. ИНИЦИАЛИЗАЦИЯ ПУТИ И РОУТЕРА                
+                    // 1. Инициализация пути и роутера           
 
                     let resource_path = <<Self::Router as crate::abstraction::Router>::Resource as UnifiedResourceIdentifierAbstraction>::Path::new(
                         path.to_string(), 
@@ -1371,7 +1471,7 @@ pub mod management {
                     let scriber: Self::Scriber = <Self::Scriber as crate::abstraction::Header>::read_from_buffer(&buf)
                         .map_err(|e| crate::abstraction::error::Error::<Self>::HeaderError(e))?;
                     
-                    // 4. ДЕРИВАЦИЯ КЛЮЧА
+                    // 4. ГЕНЕРАЦИЯ КЛЮЧА
                     let salt = scriber.get_salt();
                     let nonce = scriber.get_nounce();
                     
@@ -1385,7 +1485,7 @@ pub mod management {
                         nonce,
                     );
                     
-                    // 6. ФИНАЛЬНАЯ СБОРКА APP
+                    // 6. ФИНАЛЬНАЯ СБОРКА ПРИЛОЖЕНИЯ
                     Ok(App {
                         buffer: buf, // Считанные данные
                         resource: router, // Роутер
@@ -1403,12 +1503,13 @@ pub mod management {
                     password,
                     cipher,
                 } => {
+                    // 1. Инициализация путей и роутера    
                     let path_inner: <<Self::Router as crate::abstraction::Router>::Resource as crate::abstraction::UnifiedResourceIdentifierAbstraction>::Path = <<Self::Router as crate::abstraction::Router>::Resource as crate::abstraction::UnifiedResourceIdentifierAbstraction>::Path::new(path_inner.to_string(), crate::abstraction::Operation::Open).map_err(|e| crate::abstraction::error::Error::<Self>::ResourcePathError(e))?;
                     let path_outer: Option<<<R as crate::abstraction::Router>::Resource as crate::abstraction::UnifiedResourceIdentifierAbstraction>::Path> = match path_outer {
                         Some(path) => {
                          Some(<<Self::Router as crate::abstraction::Router>::Resource as crate::abstraction::UnifiedResourceIdentifierAbstraction>::Path::new(path.to_string(), crate::abstraction::Operation::Create).map_err(|e| crate::abstraction::error::Error::<Self>::ResourcePathError(e))?)
                         },
-                        None => None,
+                        None => Some(path_inner.clone()),
                     };
                     let mut resource_inner: <Self::Router as crate::abstraction::Router>::Resource = <Self::Router as crate::abstraction::Router>::Resource::new(path_inner, crate::abstraction::Operation::Open).map_err(|e| crate::abstraction::error::Error::<Self>::ResourcePathError(e))?;
                     
@@ -1419,13 +1520,13 @@ pub mod management {
                     // Создаем Роутер для операций чтения
                     let mut router: Self::Router = <Self::Router as crate::abstraction::Router>::new(resource_inner.path().clone(), path_outer);
                     
-                    // 2. ЧТЕНИЕ ВСЕГО ФАЙЛА В БУФЕР (Операционный шаг 1)
+                    // 2. Чтение файла в буфер
                     router.read(&mut buf).map_err(|e| crate::abstraction::error::Error::<Self>::ReaderError(e))?;
 
                     let salt = <Self::Kdf as crate::abstraction::KeyDeriver<String, ()>>::Salt::generate().map_err(|e| crate::abstraction::error::Error::SaltError(e))?;
-                    let nonce = <Self::Kdf as crate::abstraction::KeyDeriver<String, ()>>::Nonce::generate().map_err(|e| crate::abstraction::error::Error::NonceError(e))?;
-                    let mut format = resource_inner.type_resource().map_err(|e| crate::abstraction::error::Error::FormatListError(e))?;
-                     // 3. Создание ЗАГОЛОВКА (Scriber)
+                    let nonce = <Self::Kdf as crate::abstraction::KeyDeriver<String, ()>>::Nonce::generate(&password, salt.as_bytes()).map_err(|e| crate::abstraction::error::Error::NonceError(e))?;
+                    let format = resource_inner.type_resource().map_err(|e| crate::abstraction::error::Error::FormatListError(e))?;
+                     // 3. Создание подписи
                     let scriber: Self::Scriber = <Self::Scriber as crate::abstraction::Header>::new(format, cipher.clone(), salt.clone(), nonce.clone());
                     
                     let secret_password: <<App<R, M, K, F, S, N> as crate::abstraction::Application>::Kdf as crate::abstraction::KeyDeriver<String, ()>>::Secret = <<App<R, M, K, F, S, N> as crate::abstraction::Application>::Kdf as crate::abstraction::KeyDeriver<String, ()>>::Secret::new(password.clone()); // Пароль как Secret
@@ -1454,12 +1555,13 @@ pub mod management {
                     path_outer,
                     password,
                 } => {
+                    // 1. Инициализация путей и роутера    
                     let path_inner: <<Self::Router as crate::abstraction::Router>::Resource as crate::abstraction::UnifiedResourceIdentifierAbstraction>::Path = <<Self::Router as crate::abstraction::Router>::Resource as crate::abstraction::UnifiedResourceIdentifierAbstraction>::Path::new(path_inner.to_string(), crate::abstraction::Operation::Open).map_err(|e| crate::abstraction::error::Error::<Self>::ResourcePathError(e))?;
                     let path_outer: Option<<<R as crate::abstraction::Router>::Resource as crate::abstraction::UnifiedResourceIdentifierAbstraction>::Path> = match path_outer {
                         Some(path) => {
                          Some(<<Self::Router as crate::abstraction::Router>::Resource as crate::abstraction::UnifiedResourceIdentifierAbstraction>::Path::new(path.to_string(), crate::abstraction::Operation::Create).map_err(|e| crate::abstraction::error::Error::<Self>::ResourcePathError(e))?)
                         },
-                        None => None,
+                        None => Some(path_inner.clone()),
                     };
                     let mut resource_inner: <Self::Router as crate::abstraction::Router>::Resource = <Self::Router as crate::abstraction::Router>::Resource::new(path_inner, crate::abstraction::Operation::Open).map_err(|e| crate::abstraction::error::Error::<Self>::ResourcePathError(e))?;
                     
@@ -1477,7 +1579,7 @@ pub mod management {
                     let scriber: Self::Scriber = <Self::Scriber as crate::abstraction::Header>::read_from_buffer(&buf)
                         .map_err(|e| crate::abstraction::error::Error::<Self>::HeaderError(e))?;
                     
-                    // 4. ДЕРИВАЦИЯ КЛЮЧА
+                    // 4. Генерация ключа
                     let salt = scriber.get_salt();
                     let nonce = scriber.get_nounce();
                     
@@ -1508,51 +1610,36 @@ pub mod management {
         fn run(&mut self) -> Result<(), crate::abstraction::error::Error<Self>> {
             let size: usize = K::KEY_LENGTH;
             let mut buffer = vec![0u8; size];
-            self.key_deriver.derive_key(&mut buffer);
-            match &self.cli.command {
-                interface::cli::Command::Prepare{..} =>{ 
-                    let cipher = self.scriber.get_cipher().build(&mut buffer).map_err(|e| crate::abstraction::error::Error::EncryptionListError(e))?;
+            self.key_deriver.derive_key(&mut buffer).map_err(|e| crate::abstraction::error::Error::KDFError(e))?;
+            let cipher = self.scriber.get_cipher().build(&mut buffer).map_err(|e| crate::abstraction::error::Error::EncryptionListError(e))?;
+            let mut res_buf = match &self.cli.command {
+                interface::cli::Command::Prepare{..} =>{
+                    let mut res_buf = vec![0u8; self.buffer.len() + 42]; // 42 так как подпись
                     cipher.encode(&mut self.buffer);
-                    self.resource.write(
-                        &mut self.buffer
-                    )
+                    self.scriber.write_to_buffer(&mut self.buffer, &mut res_buf); 
+                    res_buf
                 },
-               interface::cli::Command::Read{..} => { todo!();
-                //   let ext = self.resource.inner.extension();
-                //   println!("{:#?}", ext);
-                //    ext.1.build().ok_or_else(|| {
-                //    crate::abstraction::Error::new(Box::new(std::io::Error::new(
-                //       std::io::ErrorKind::InvalidInput,
-                //       "Не удалось создать дешифратор: формат дешифрования не поддерживается."
-                //    )))
-                // })?.decode(&mut self.buffer);
-                //    match ext {
-                //       crate::abstraction::FileFormat::TXT => {
-                //          println!("Текст: {}", String::from_utf8_lossy(&self.buffer).to_string());
-                //          return Result::Ok(());
-                //       }
-                //       crate::abstraction::FileFormat::DOCX => {
-                //          // match R {
-                //          //    Ok(text) => {
-                //          //       println!("Текст из DOCX: {}", text);
-                //          //       return Result::Ok(());
-                //          //    }
-                //          //    Err(e) => {
-                //          //       return Err(Error::new(Box::new(e))); 
-                //          //    }
-                //          // }
-                //       }
-                //       _ => return Err(crate::abstraction::Error::new(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("Формат файла не поддерживается для данной комманды"))))),
-                //    }
+                interface::cli::Command::Read{..} => {
+                    let mut res_buf = vec![0u8; self.buffer.len() - 42];
+                    self.scriber.remove_from_buffer(&mut self.buffer, &mut res_buf);
+                    cipher.decode(&mut res_buf);
+                    self.scriber.get_format().print_function(&mut res_buf);
+                    return Ok(());
                 },
-                interface::cli::Command::Decrypt{..} => todo!(),
+                interface::cli::Command::Decrypt{..} => {
+                    println!("{:?}", self.scriber.to_byte());
+                    let mut res_buf = vec![0u8; self.buffer.len() - 42];
+                    self.scriber.remove_from_buffer(&mut self.buffer, &mut res_buf);
+                    cipher.decode(&mut res_buf);
+                    res_buf
+                },
             };
-            println!("{:?}", String::from_utf8(self.buffer.to_vec()));
+            
+            self.resource.write(
+                &mut res_buf
+            ).map_err(|e| crate::abstraction::error::Error::WriterError(e))?;
+
             Ok(())
-            // match self.resource.write(&self.buffer, &self.cli, encrypt) {
-            //     Ok(_) => Result::Ok(()),
-            //     Err(e) => Result::Err(e),
-            // }
         }
     }
 }
@@ -1567,7 +1654,7 @@ type Applicat = management::App<
         realisation::derive_key::chacha::salt::StandardSalt,
         realisation::derive_key::chacha::nonce::ChaChaNonce,
     >,
-    realisation::derive_key::chacha::ChaChaKdf<12>,
+    realisation::derive_key::chacha::ChaChaKdf<32>,
     realisation::object::file::resource_type::ResourceType,
     realisation::derive_key::chacha::salt::StandardSalt,
     realisation::derive_key::chacha::nonce::ChaChaNonce,
